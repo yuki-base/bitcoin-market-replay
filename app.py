@@ -3,7 +3,6 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import requests
-from datetime import datetime, timedelta, timezone
 
 st.set_page_config(
     page_title="Bitcoin Market Replay",
@@ -14,37 +13,57 @@ st.set_page_config(
 st.title("₿ Bitcoin Historical Market Replay")
 st.caption("過去のビットコイン相場を再生して売買を練習するシミュレーター")
 
+
 # -------------------------
 # 価格データ取得
 # -------------------------
 @st.cache_data(ttl=300)
 def get_btc_data():
-    url = "https://api.binance.com/api/v3/klines"
+
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/BTC-JPY"
 
     params = {
-        "symbol": "BTCUSDT",
-        "interval": "1h",
-        "limit": 500
+        "range": "60d",
+        "interval": "1h"
     }
 
-    response = requests.get(url, params=params, timeout=15)
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=20
+    )
+
     response.raise_for_status()
 
     data = response.json()
 
-    df = pd.DataFrame(data, columns=[
-        "time", "open", "high", "low", "close",
-        "volume", "close_time", "quote_volume",
-        "trades", "buy_volume", "buy_quote_volume", "ignore"
-    ])
+    result = data["chart"]["result"][0]
 
-    df["time"] = pd.to_datetime(df["time"], unit="ms")
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
+    timestamps = result["timestamp"]
+    quote = result["indicators"]["quote"][0]
+
+    df = pd.DataFrame({
+        "time": pd.to_datetime(timestamps, unit="s"),
+        "open": quote["open"],
+        "high": quote["high"],
+        "low": quote["low"],
+        "close": quote["close"],
+        "volume": quote["volume"]
+    })
+
+    df = df.dropna().reset_index(drop=True)
 
     return df
 
 
+# -------------------------
+# データ取得エラー処理
+# -------------------------
 try:
     df = get_btc_data()
 
@@ -52,6 +71,12 @@ except Exception as e:
     st.error("価格データを取得できませんでした。時間をおいて再度お試しください。")
     st.caption(str(e))
     st.stop()
+
+
+if df.empty:
+    st.error("価格データがありません。")
+    st.stop()
+
 
 # -------------------------
 # シミュレーション設定
@@ -66,7 +91,8 @@ if "trades" not in st.session_state:
     st.session_state.trades = []
 
 if "replay_index" not in st.session_state:
-    st.session_state.replay_index = 50
+    st.session_state.replay_index = min(50, len(df) - 1)
+
 
 # -------------------------
 # 再生位置
@@ -92,7 +118,9 @@ st.session_state.replay_index = index
 
 visible = df.iloc[:index + 1].copy()
 current = visible.iloc[-1]
+
 price = float(current["close"])
+
 
 # -------------------------
 # 資産情報
@@ -101,12 +129,13 @@ total_assets = st.session_state.cash + st.session_state.btc * price
 
 col1, col2, col3, col4 = st.columns(4)
 
-col1.metric("BTC価格", f"${price:,.2f}")
+col1.metric("BTC価格", f"¥{price:,.0f}")
 col2.metric("現金残高", f"¥{st.session_state.cash:,.0f}")
 col3.metric("保有BTC", f"{st.session_state.btc:.6f} BTC")
 col4.metric("総資産（評価額）", f"¥{total_assets:,.0f}")
 
-st.caption("※初期資金100万円。BTC価格はUSDT建てで表示しています。")
+st.caption("※初期資金100万円。BTC価格は日本円建てです。")
+
 
 # -------------------------
 # チャート
@@ -128,7 +157,7 @@ fig.update_layout(
     template="plotly_dark",
     height=550,
     xaxis_title="Time",
-    yaxis_title="Price (USDT)",
+    yaxis_title="Price (JPY)",
     xaxis_rangeslider_visible=False
 )
 
@@ -139,14 +168,20 @@ st.write(
     current["time"].strftime("%Y-%m-%d %H:%M")
 )
 
+
 # -------------------------
-# 売買機能
+# 売買シミュレーション
 # -------------------------
 st.subheader("💰 売買シミュレーション")
 
 buy_col, sell_col = st.columns(2)
 
+
+# -------------------------
+# 購入
+# -------------------------
 with buy_col:
+
     st.markdown("### 🟢 BTCを購入")
 
     buy_amount = st.number_input(
@@ -159,9 +194,11 @@ with buy_col:
     )
 
     if st.button("購入する", use_container_width=True):
+
         cost = price * buy_amount
 
         if cost <= st.session_state.cash:
+
             st.session_state.cash -= cost
             st.session_state.btc += buy_amount
 
@@ -173,10 +210,16 @@ with buy_col:
             })
 
             st.success(f"{buy_amount:.6f} BTCを購入しました。")
+
         else:
             st.error("現金残高が足りません。")
 
+
+# -------------------------
+# 売却
+# -------------------------
 with sell_col:
+
     st.markdown("### 🔴 BTCを売却")
 
     sell_amount = st.number_input(
@@ -189,7 +232,9 @@ with sell_col:
     )
 
     if st.button("売却する", use_container_width=True):
+
         if sell_amount <= st.session_state.btc:
+
             proceeds = price * sell_amount
 
             st.session_state.cash += proceeds
@@ -203,8 +248,10 @@ with sell_col:
             })
 
             st.success(f"{sell_amount:.6f} BTCを売却しました。")
+
         else:
             st.error("保有BTCが足りません。")
+
 
 # -------------------------
 # 取引履歴
@@ -212,17 +259,27 @@ with sell_col:
 st.subheader("📋 売買履歴")
 
 if st.session_state.trades:
+
     history = pd.DataFrame(st.session_state.trades)
-    st.dataframe(history, use_container_width=True)
+
+    st.dataframe(
+        history,
+        use_container_width=True
+    )
+
 else:
+
     st.info("まだ取引履歴はありません。")
+
 
 # -------------------------
 # リセット
 # -------------------------
 if st.button("シミュレーションをリセット"):
+
     st.session_state.cash = 1_000_000
     st.session_state.btc = 0.0
     st.session_state.trades = []
-    st.session_state.replay_index = 50
+    st.session_state.replay_index = min(50, len(df) - 1)
+
     st.rerun()
